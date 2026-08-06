@@ -8,6 +8,41 @@ lock contention between concurrent `bd` processes is being characterised
 separately. Where contention and CPU touch each other, this report says so and
 stops there rather than changing locking behaviour.
 
+### Correction to the brief's headline number
+
+The task was framed around `real 19.845s / user 2.344s`. That sample was taken
+while six workers were hammering `bd` concurrently, so roughly a second of the
+"user CPU" was contention-induced spin/retry during lock acquisition, not
+hot-path work. The corrected uncontended target is **~1.2–1.3s wall and ~1.3s
+user**.
+
+This does not change any measurement in this report. The isolated fixture was
+built specifically to strip contention out, and its baseline came in at
+**real 1.304s / user 1.328s** (n=15) — the corrected figure. Every before/after
+number below is already stated against that baseline, never against 2.344s.
+
+One refinement on top of the correction: **~1.2s is not the uncontended floor
+either — it is the un-GC'd floor.** Measured on a quiet host with the same
+unchanged fleet binary:
+
+```
+                                        real     user
+rustfetch  (136MB journal, 3.4MB idx)   1.13s    1.28s
+mayor      (journal GC'd away)          0.25s    0.35s
+```
+
+And process start/init is not where the remaining time lives:
+
+```
+bd version  (runtime + package init, no store)     real 0.093s  user 0.085s
+bd where    (init + workspace discovery + config)  real 0.133s  user 0.120s
+```
+
+Init is ~0.085–0.15s user, roughly 10% of 1.3s. The CPU profile agrees from the
+other side: it covers `PersistentPreRun`→`PostRun` and captured 1.27s of 1.388s
+total user, leaving ~0.12s outside its window. The remaining cost is the nine
+engine opens, not process startup.
+
 ## TL;DR
 
 Two code changes cut **29–40% of user CPU** off every embedded-Dolt read, with
