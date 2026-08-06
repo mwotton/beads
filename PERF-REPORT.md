@@ -24,7 +24,13 @@ on it took `bd show` from 1.33s to 0.24s of user CPU.
 
 The remaining ceiling is architectural and is stated at the bottom: **bd opens
 and destroys the entire Dolt SQL engine nine times to answer one `bd show`.**
-That is the number that should drive the dolt-server decision.
+
+That ceiling is what dolt server mode removes, and it was measured too (see the
+addendum): server mode cuts **total** system CPU to 0.118s/command — better than
+a freshly GC'd embedded store — and under real contention (load average 81–110)
+takes `bd show` from **4.18s to 0.20s wall**. It is a config choice, not a code
+change; its costs are a required `dolt` binary, a per-repo data migration, and
+~195 MB resident per repo server.
 
 ## Method
 
@@ -246,6 +252,100 @@ is called twice for the same ID** (opens 3 and 4). I left it because the fix
 belongs in the `workapi`/`storereader` read path rather than in storage, and it
 is worth ~1/9 of the open cost — small next to the item above, and better done
 as its own change.
+
+## Addendum: does dolt server mode help? (measured — yes, substantially)
+
+Asked after the main investigation. Short answer: **yes, and it is not a code
+change** — bd already ships server mode; `dolt_mode` in `.beads/metadata.json`
+selects it. The measured workspace is explicitly `"dolt_mode": "embedded"`.
+
+Setup: a third copy of the same fixture, `dolt_mode` set to `server`, data
+migrated to the server data dir, `bd dolt start`. The `dolt` CLI was built from
+the exact library version beads vendors (`v0.40.5-0.20260715172757-a6690826d767`)
+to a scratch GOPATH. Same binary (`bd-after`) for all arms, n=15.
+
+**This run happened under load average 81→110**, i.e. the contended condition
+that produced the original 19.8s report — so unlike the earlier matrix, the
+`real` column here is meaningful.
+
+```
+                       real      client user   server CPU   TOTAL CPU
+bd show
+  embedded, un-GC'd    4.184s    0.819s        —            0.819s
+  embedded, bd gc'd    0.372s    0.210s        —            0.210s
+  server,   un-GC'd    0.200s    0.080s        0.038s       0.118s
+bd list --limit 3
+  embedded, un-GC'd    3.742s    0.578s
+  embedded, bd gc'd    0.404s    0.209s
+  server,   un-GC'd    0.215s    0.088s
+bd ready
+  embedded, un-GC'd    2.204s    0.365s
+  embedded, bd gc'd    0.301s    0.178s
+  server,   un-GC'd    0.367s    0.088s
+```
+
+Server CPU measured honestly from `/proc/<pid>/stat` utime+stime across 15
+`bd show` runs, so the TOTAL column counts both processes. Output is
+byte-identical to embedded for `show` and `list --limit 0`.
+
+Three things this shows:
+
+1. **Client CPU collapses to the process-start floor.** 0.080s/command is
+   `bd version`'s cost — the client does essentially no database work. The nine
+   engine opens become nine cheap connections to an already-warm engine.
+2. **Server mode beats even a freshly GC'd embedded store on total CPU**
+   (0.118s vs 0.210s), because the journal replay and `LoadDoltDB` are paid
+   once at server start rather than nine times per command.
+3. **The wall-clock win under load is the big one: 4.18s → 0.20s, ~20×.** That
+   is the axis the original 19.8s complaint lives on. The exclusive DB lock
+   stops being contended by N short-lived bd processes; it is held once by the
+   server, and concurrency is handled by the SQL layer, which is designed for
+   it.
+
+Costs, so the decision is informed:
+
+- **A `dolt` binary is required on PATH.** There is none on this host today
+  (`exec.LookPath("dolt")`, `doltserver.go:1250`), so server mode cannot be
+  turned on here without installing it.
+- **Per-repo data migration.** Server mode reads `.beads/dolt/<db>`, embedded
+  reads `.beads/embeddeddolt/<db>`. `bd dolt start` happily starts against an
+  empty server data dir, so this is a real footgun: the server comes up, works,
+  and shows no data.
+- **A long-lived process per repo: ~195 MB RSS, 57 threads.** ~20 workspaces on
+  this host hold Dolt data, so an all-repos rollout is roughly 4 GB resident if
+  every server is up at once. Servers auto-start on demand, so in practice only
+  active repos pay.
+- Server lifecycle (stale servers, port allocation, restarts) becomes an
+  operational surface that embedded mode does not have.
+
+I did not test writes, `bd dolt push/pull`, or federation under server mode —
+those are the parts most likely to differ, and they are exactly the semantics
+this task was told not to disturb. **Validate write and sync paths before
+rolling this out.**
+
+## Addendum: the `bd gc` finding is per repo, not global
+
+Each `.beads/embeddeddolt/<db>/.dolt` is an independent Dolt database with its
+own chunk journal. I ran `bd gc` on **one throwaway copy of one repo**; no live
+workspace was touched. A read-only survey of this host shows the journal (and
+therefore the per-open replay cost) is a per-repo problem, and mayor is not the
+worst:
+
+```
+ 169.9 MB journal   4.10 MB idx   lambdalabs/monitor
+ 135.3 MB journal   3.31 MB idx   lambdalabs/rustfetch
+ 115.0 MB journal   2.73 MB idx   lambdalabs/mr-manager
+  75.3 MB journal   1.57 MB idx   lambdalabs/mayor
+  51.9 MB journal   1.58 MB idx   lambdalabs/qwenplayground
+  51.8 MB journal   1.32 MB idx   lambdalabs/reeve
+  43.6 MB journal   1.18 MB idx   lambdalabs/panopticon
+  38.5 MB journal   0.98 MB idx   lambdalabs/skills-private
+  … 12 more workspaces below 30 MB
+```
+
+`journal.idx` is what gets replayed per engine open, so `monitor` pays roughly
+2.6× mayor's journal cost on every `bd` invocation. Gains from `bd gc` should
+scale accordingly, and it must be run per workspace.
 
 ## Reproducing
 
