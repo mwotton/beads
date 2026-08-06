@@ -1,5 +1,27 @@
 # bd in-process hot path: profile and fixes
 
+> **STATUS: PARKED 2026-08-06.** Superseded as top priority by MAYOR TASK 2
+> (embedded → server migration); see `MIGRATION-REPORT.md`.
+>
+> Landed and complete: two code fixes (committed, tested, byte-identical
+> output), the `bd gc` operational finding (applied to 10 live repos, 443MB
+> reclaimed, verified), the server-mode measurement, and the concurrency ladder.
+>
+> Open threads, in the order I'd pick them up again:
+> 1. **The nine engine opens per `bd show`** — 63% of the remaining per-call
+>    constant AND the entire serialization slope (one exclusive-lock acquisition
+>    per open). Deliberately not changed: it is a locking-behaviour decision.
+>    This is what server mode makes moot.
+> 2. **Duplicate `GetIssue`** — the same issue is fetched twice per `bd show`
+>    (opens 3 and 4 in the caller table below). Belongs in the
+>    `workapi`/`storereader` read path. Worth ~1/9 of the open cost.
+> 3. **`rustfetch` is still un-GC'd** (136MB journal) — held back because worker
+>    `rf-n8nh` is measuring contention there.
+> 4. **Three workspaces at schema v53 vs binary v62** (`qwenplayground`,
+>    `cdp-allocator`, `mayor.pre-handoff`) — `bd gc` would silently migrate them.
+> 5. Init is 37% of the GC'd constant but not cheaply reclaimable (see below).
+>    No win claimed.
+
 Branch: `bd-hotpath`. Tracking bead `rf-s3d0` (lives in another repo; `bd` does
 not resolve here).
 
