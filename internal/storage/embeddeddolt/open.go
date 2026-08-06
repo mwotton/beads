@@ -14,8 +14,31 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
+	"github.com/dolthub/dolt/go/store/nbs"
 	doltembed "github.com/dolthub/driver/v2"
 )
+
+// nbs.TableIndexGCFinalizerWithStackTrace defaults to true in the Dolt
+// library: every table index opened captures a full runtime stack trace so a
+// leaked index can name its allocation site when the finalizer panics. The
+// dolt CLI turns this off in its own main (cmd/dolt/dolt.go); beads embeds the
+// library and so inherited the debug default. In bd the cost is not
+// theoretical — a `bd show` opens one index per table file, and debug.Stack()
+// against bd's deep call stacks measured ~20% of the command's total user CPU.
+//
+// Mirror the dolt CLI exactly, including its opt-in env var, so anyone
+// debugging an unclosed-table-file assertion gets the same switch here.
+func init() {
+	nbs.TableIndexGCFinalizerWithStackTrace = tableIndexStackTracesEnabled(os.Getenv(dconfig.EnvVerboseAssertTableFilesClosed))
+}
+
+// tableIndexStackTracesEnabled reports whether Dolt should capture an
+// allocation stack trace for every table index. Split out from init so the
+// env-var contract is testable; init itself runs once per process.
+func tableIndexStackTracesEnabled(verboseAssert string) bool {
+	return verboseAssert != ""
+}
 
 // validIdentifier matches safe SQL identifiers (letters, digits, underscores).
 // Hyphens are excluded because database names are interpolated into system

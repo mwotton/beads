@@ -2024,6 +2024,8 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
 }
 
 func main() {
+	tuneGC()
+
 	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
 	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
 	// setups where wrapper scripts set BEADS_DIR for routing.
