@@ -40,8 +40,62 @@ bd where    (init + workspace discovery + config)  real 0.133s  user 0.120s
 
 Init is ~0.085–0.15s user, roughly 10% of 1.3s. The CPU profile agrees from the
 other side: it covers `PersistentPreRun`→`PostRun` and captured 1.27s of 1.388s
-total user, leaving ~0.12s outside its window. The remaining cost is the nine
-engine opens, not process startup.
+total user, leaving ~0.12s outside its window.
+
+**Superseded in part — see the concurrency ladder below.** Measuring init
+against the un-GC'd 1.3s was the wrong denominator. Against the real GC'd
+constant it is a much larger share.
+
+### Concurrency ladder: contention serializes, it does not burn CPU
+
+Run on both fixtures — identical data, differing only in storage layout — with
+N concurrent `bd show` processes, recording each process's own CPU:
+
+```
+UN-GC'd (78MB journal)              GC'd (same data, journal gone)
+N=1  wall 0.94s  user/proc 0.82s    N=1  wall 0.24s  user/proc 0.23s
+N=2  wall 1.77s  user/proc 0.83s    N=2  wall 0.64s  user/proc 0.22s
+N=3  wall 3.62s  user/proc 0.84s    N=3  wall 0.73s  user/proc 0.23s
+N=5  wall 5.80s  user/proc 0.83s    N=5  wall 1.03s  user/proc 0.24s
+     slope ≈ 1.22s per caller            slope ≈ 0.20s per caller
+```
+
+Three conclusions:
+
+1. **User CPU is flat across concurrency** — to two decimals, on both stores.
+   Contention does not inflate CPU; lock waiting is a futex sleep, not a spin.
+   An earlier draft of this report attributed ~1s of the original 2.344s sample
+   to contention-induced spin. That was wrong and is retracted.
+
+2. **The serialization slope IS the per-call constant.** Calls serialize, so
+   `wall(N) ≈ N × (time each holds the lock)`, and the slope tracks single-call
+   duration in both arms (1.22 vs 0.93s; 0.20 vs 0.22s). GC cut the constant
+   3.6× and the slope 6× as a direct consequence. Constant and scaling are not
+   separate problems — the constant is the multiplier on N.
+
+3. **The difference is storage layout, not rows scanned.** Both fixtures hold
+   identical data (`bd list --limit 0 --json` is byte-identical between them),
+   and `bd show` reads one issue, so row count is invariant. The cost is journal
+   index replay at engine open, paid 9× per command regardless of rows touched.
+   This matters operationally: the lever is storage GC (`--skip-decay`), not
+   issue decay. `bd gc`'s default first phase deletes closed issues older than
+   90 days, which is the wrong lever for a "too many rows" diagnosis.
+
+### What the GC'd constant is actually made of
+
+```
+per-call constant, GC'd store        0.23s user
+  ├─ process start + package init    0.085s  (37%)
+  └─ store work, 9 engine opens      0.145s  (63%)
+```
+
+Package init is 59.5 ms across 672 packages (`GODEBUG=inittrace=1`), the largest
+items being `chroma/v2/lexers` (10.0 ms) and `chroma/v2/styles` (9.9 ms) —
+syntax highlighting a `--json` command never uses. It is **not** cheap to
+reclaim: chroma arrives via `glamour` for markdown rendering, and Go runs `init`
+for everything linked into the binary, so removing the cost means not linking
+glamour — a feature or build-tag decision, not a performance tweak. No win is
+claimed here.
 
 ## TL;DR
 
