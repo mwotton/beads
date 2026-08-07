@@ -239,33 +239,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
-			if hasOpenIssues {
-				// "all issues have blocking dependencies" is not the only way
-				// to get here: a bead held for an operator is unblocked and
-				// still absent, and it is absent from `bd blocked` too, so
-				// naming blockers alone would send the reader looking somewhere
-				// it cannot be found.
-				held := countHeldForHuman(ctx, activeStore, filter)
-				switch {
-				case held > 0:
-					// Deliberately does not also claim the remainder is
-					// blocked: this branch knows the held count and nothing
-					// else, and under a label or type filter the others may
-					// simply not match.
-					noun := "issue is"
-					if held > 1 {
-						noun = "issues are"
-					}
-					fmt.Printf("\n%s No ready work found (%d %s held for a human decision)\n",
-						ui.RenderWarn("✨"), held, noun)
-					fmt.Printf("  %s\n\n", ui.RenderMuted("See 'bd human list'."))
-				default:
-					fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-						ui.RenderWarn("✨"))
-				}
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
+			printEmptyReadyQueue(hasOpenIssues, func() int {
+				return countHeldForHuman(ctx, activeStore, filter)
+			})
 			maybeShowTip(store)
 			return nil
 		}
@@ -485,6 +461,39 @@ func countHeldForHuman(ctx context.Context, s storage.Storage, filter types.Work
 		return 0
 	}
 	return len(held)
+}
+
+// printEmptyReadyQueue renders the hint for an empty `bd ready` listing. Both
+// routes call it, so the direct and daemon-mode explanations cannot diverge —
+// they already had, with the direct one counting held beads while the proxied
+// one still blamed blockers for a queue that had none.
+//
+// countHeld is a closure rather than a count because it costs a query, and the
+// no-open-issues case answers without one.
+func printEmptyReadyQueue(hasOpenIssues bool, countHeld func() int) {
+	if !hasOpenIssues {
+		fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		return
+	}
+	// "all issues have blocking dependencies" is not the only way to get
+	// here: a bead held for an operator is unblocked and still absent, and
+	// it is absent from `bd blocked` too, so naming blockers alone would
+	// send the reader looking somewhere it cannot be found.
+	if held := countHeld(); held > 0 {
+		// Deliberately does not also claim the remainder is blocked: this
+		// branch knows the held count and nothing else, and under a label
+		// or type filter the others may simply not match.
+		noun := "issue is"
+		if held > 1 {
+			noun = "issues are"
+		}
+		fmt.Printf("\n%s No ready work found (%d %s held for a human decision)\n",
+			ui.RenderWarn("✨"), held, noun)
+		fmt.Printf("  %s\n\n", ui.RenderMuted("See 'bd human list'."))
+		return
+	}
+	fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+		ui.RenderWarn("✨"))
 }
 
 // readyExplainHeldFilter selects the beads --explain would otherwise be blind
