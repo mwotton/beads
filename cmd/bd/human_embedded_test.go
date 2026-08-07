@@ -6,10 +6,33 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 )
+
+// assertStatLine asserts that `bd human stats` reported want for the named
+// counter, tolerating any run of whitespace between the label and the value so
+// a change to the printf column widths is not a test failure.
+func assertStatLine(t *testing.T, out, label string, want int) {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(label) + `:\s+(\d+)\s*$`)
+	m := re.FindStringSubmatch(out)
+	if m == nil {
+		t.Errorf("no %q line in stats output:\n%s", label, out)
+		return
+	}
+	got, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Errorf("unparseable %q count %q:\n%s", label, m[1], out)
+		return
+	}
+	if got != want {
+		t.Errorf("stats %s = %d, want %d:\n%s", label, got, want, out)
+	}
+}
 
 // bdHuman runs "bd human" with the given args and returns stdout.
 func bdHuman(t *testing.T, bd, dir string, args ...string) string {
@@ -162,13 +185,13 @@ func TestEmbeddedHuman(t *testing.T) {
 				t.Errorf("expected %s under --status closed:\n%s", closed, closedOut)
 			}
 		}
+		// Matched on the label/value pair rather than the exact printf column
+		// widths, so reformatting the stats block cannot fail this test for a
+		// cosmetic reason.
 		statsOut := bdHuman(t, bd, dir, "stats")
-		if !strings.Contains(statsOut, "Pending:    0") {
-			t.Errorf("expected zero pending decisions after both closes:\n%s", statsOut)
-		}
-		if !strings.Contains(statsOut, "Responded:  1") || !strings.Contains(statsOut, "Dismissed:  1") {
-			t.Errorf("stats must still count the closed beads it can only see via the label:\n%s", statsOut)
-		}
+		assertStatLine(t, statsOut, "Pending", 0)
+		assertStatLine(t, statsOut, "Responded", 1)
+		assertStatLine(t, statsOut, "Dismissed", 1)
 	})
 }
 

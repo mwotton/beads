@@ -293,6 +293,15 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	heldFilter, err := readyExplainHeldFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	heldPage, err := uw.IssueUseCase().GetReadyWork(ctx, heldFilter)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	readyIDs := make([]string, len(readyIssues))
 	for i, issue := range readyIssues {
 		readyIDs[i] = issue.ID
@@ -341,7 +350,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		blockerMap[wisp.ID] = wisp
 	}
 
-	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles)
+	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles, heldPage.Items)
 
 	if jsonOutput {
 		_ = outputJSON(explanation)

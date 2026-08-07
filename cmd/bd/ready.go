@@ -240,8 +240,29 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
 			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
+				// "all issues have blocking dependencies" is not the only way
+				// to get here: a bead held for an operator is unblocked and
+				// still absent, and it is absent from `bd blocked` too, so
+				// naming blockers alone would send the reader looking somewhere
+				// it cannot be found.
+				held := countHeldForHuman(ctx, activeStore, filter)
+				switch {
+				case held > 0:
+					// Deliberately does not also claim the remainder is
+					// blocked: this branch knows the held count and nothing
+					// else, and under a label or type filter the others may
+					// simply not match.
+					noun := "issue is"
+					if held > 1 {
+						noun = "issues are"
+					}
+					fmt.Printf("\n%s No ready work found (%d %s held for a human decision)\n",
+						ui.RenderWarn("✨"), held, noun)
+					fmt.Printf("  %s\n\n", ui.RenderMuted("See 'bd human list'."))
+				default:
+					fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+						ui.RenderWarn("✨"))
+				}
 			} else {
 				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 			}
@@ -442,6 +463,44 @@ func readyExplainFilter() (types.WorkFilter, error) {
 	})
 }
 
+// heldForHumanFilter re-asks the caller's own ready question with the
+// operator-queue label added. Naming the label is the documented opt-in
+// (sqlbuild.ReadyWorkExcludeLabels), so the result is exactly the beads this
+// listing withheld — under the same predicates, not a second definition.
+func heldForHumanFilter(filter types.WorkFilter) types.WorkFilter {
+	held := filter
+	held.Labels = append(append([]string(nil), filter.Labels...), types.LabelHuman)
+	held.Limit = 0
+	held.Offset = 0
+	return held
+}
+
+// countHeldForHuman sizes the withheld set for the empty-queue hint. It is
+// advisory: a failure means the hint stays generic rather than that the
+// command fails, since the listing itself already succeeded.
+func countHeldForHuman(ctx context.Context, s storage.Storage, filter types.WorkFilter) int {
+	held, err := s.GetReadyWork(ctx, heldForHumanFilter(filter))
+	if err != nil {
+		debug.Logf("warning: failed to count human-held issues: %v", err)
+		return 0
+	}
+	return len(held)
+}
+
+// readyExplainHeldFilter selects the beads --explain would otherwise be blind
+// to: those that pass every ready predicate EXCEPT the operator-queue label.
+// Naming the label is the documented opt-in (sqlbuild.ReadyWorkExcludeLabels),
+// so the same ready query, plus the label, is exactly the withheld set — no
+// second definition of readiness to drift from the first.
+func readyExplainHeldFilter() (types.WorkFilter, error) {
+	filter, err := readyExplainFilter()
+	if err != nil {
+		return filter, err
+	}
+	filter.Labels = append(append([]string(nil), filter.Labels...), types.LabelHuman)
+	return filter, nil
+}
+
 func runReadyExplain(_ *cobra.Command) error {
 	ctx := rootCtx
 
@@ -457,6 +516,15 @@ func runReadyExplain(_ *cobra.Command) error {
 	}
 
 	blockedIssues, err := activeStore.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	heldFilter, err := readyExplainHeldFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	heldIssues, err := activeStore.GetReadyWork(ctx, heldFilter)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -503,7 +571,7 @@ func runReadyExplain(_ *cobra.Command) error {
 		blockerMap[issue.ID] = issue
 	}
 
-	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles)
+	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles, heldIssues)
 
 	if jsonOutput {
 		return outputJSON(explanation)
@@ -548,6 +616,19 @@ func runReadyExplain(_ *cobra.Command) error {
 		}
 	}
 
+	// Held section: unblocked, but not dispatchable.
+	if len(explanation.Held) > 0 {
+		fmt.Printf("%s Held for human decision (%d issues):\n\n", ui.RenderWarn("✋"), len(explanation.Held))
+		for _, item := range explanation.Held {
+			fmt.Printf("  %s [%s] %s\n",
+				ui.RenderID(item.ID),
+				ui.RenderPriority(item.Priority),
+				item.Title)
+			fmt.Printf("    Reason: %s\n", item.Reason)
+		}
+		fmt.Printf("\n  %s\n\n", ui.RenderMuted("See 'bd human list'; 'bd ready --label human' lists them as work."))
+	}
+
 	// Cycles section
 	if len(explanation.Cycles) > 0 {
 		fmt.Printf("%s Cycles detected (%d):\n\n", ui.RenderFail("⚠"), len(explanation.Cycles))
@@ -562,6 +643,9 @@ func runReadyExplain(_ *cobra.Command) error {
 		ui.RenderMuted("─"),
 		explanation.Summary.TotalReady,
 		explanation.Summary.TotalBlocked)
+	if explanation.Summary.TotalHeld > 0 {
+		fmt.Printf(", %d held for human decision", explanation.Summary.TotalHeld)
+	}
 	if explanation.Summary.CycleCount > 0 {
 		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
 	}

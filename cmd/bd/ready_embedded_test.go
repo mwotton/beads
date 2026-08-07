@@ -251,6 +251,27 @@ func TestEmbeddedReady(t *testing.T) {
 		if named := bdReady(t, "--label", "human"); !strings.Contains(named, flagged.ID) {
 			t.Errorf("bd ready --label human must return the human queue:\n%s", named)
 		}
+
+		// --label-pattern and --label-regex are inclusion clauses too. Before
+		// the opt-in covered them, pattern-selecting the label AND excluding
+		// it by default was a contradiction that returned nothing, silently.
+		if pat := bdReady(t, "--label-pattern", "human*"); !strings.Contains(pat, flagged.ID) {
+			t.Errorf("bd ready --label-pattern 'human*' must not return an empty set:\n%s", pat)
+		}
+		if rex := bdReady(t, "--label-regex", "^human$"); !strings.Contains(rex, flagged.ID) {
+			t.Errorf("bd ready --label-regex '^human$' must not return an empty set:\n%s", rex)
+		}
+
+		// --explain is the "why isn't this bead ready?" tool, so the held
+		// bead must be accounted for there rather than simply missing from
+		// both the ready and blocked sets.
+		explain := bdReady(t, "--explain")
+		if !strings.Contains(explain, flagged.ID) {
+			t.Errorf("bd ready --explain must account for held bead %s:\n%s", flagged.ID, explain)
+		}
+		if !strings.Contains(explain, "Held for human decision") {
+			t.Errorf("bd ready --explain must name the held category:\n%s", explain)
+		}
 	})
 
 	// ===== -C flag =====

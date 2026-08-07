@@ -1548,8 +1548,14 @@ type BlockedIssue struct {
 
 // ReadyExplanation provides reasoning for why issues are ready or blocked.
 type ReadyExplanation struct {
-	Ready   []ReadyItem    `json:"ready"`
-	Blocked []BlockedItem  `json:"blocked"`
+	Ready   []ReadyItem   `json:"ready"`
+	Blocked []BlockedItem `json:"blocked"`
+	// Held are issues that clear every dependency test but are withheld from
+	// the dispatch queue by something other than a blocker. Without this
+	// category `bd ready --explain` — the tool whose whole job is answering
+	// "why isn't this bead ready?" — could see a held bead in neither list
+	// and offer no account of its absence.
+	Held    []HeldItem     `json:"held,omitempty"`
 	Cycles  [][]string     `json:"cycles,omitempty"`
 	Summary ExplainSummary `json:"summary"`
 }
@@ -1571,6 +1577,12 @@ type BlockedItem struct {
 	BlockedByCount int           `json:"blocked_by_count"`
 }
 
+// HeldItem explains an issue that is unblocked yet withheld from ready work.
+type HeldItem struct {
+	Issue
+	Reason string `json:"reason"`
+}
+
 // BlockerInfo provides details about a single blocker.
 type BlockerInfo struct {
 	ID       string `json:"id"`
@@ -1583,6 +1595,7 @@ type BlockerInfo struct {
 type ExplainSummary struct {
 	TotalReady   int `json:"total_ready"`
 	TotalBlocked int `json:"total_blocked"`
+	TotalHeld    int `json:"total_held,omitempty"`
 	CycleCount   int `json:"cycle_count"`
 }
 
@@ -1595,6 +1608,7 @@ func BuildReadyExplanation(
 	allDeps map[string][]*Dependency,
 	blockerMap map[string]*Issue,
 	cycles [][]*Issue,
+	heldForHuman []*Issue,
 ) ReadyExplanation {
 	// Build ready items with explanations
 	readyItems := make([]ReadyItem, 0, len(readyIssues))
@@ -1656,6 +1670,20 @@ func BuildReadyExplanation(
 		})
 	}
 
+	// Held: unblocked but not dispatchable. Every entry here is a bead the
+	// caller already resolved as otherwise-ready, so the reason is the label
+	// that withheld it rather than anything recomputed.
+	heldItems := make([]HeldItem, 0, len(heldForHuman))
+	for _, issue := range heldForHuman {
+		if issue == nil {
+			continue
+		}
+		heldItems = append(heldItems, HeldItem{
+			Issue:  *issue,
+			Reason: "awaiting an operator decision (labeled '" + LabelHuman + "')",
+		})
+	}
+
 	// Build cycle info
 	var cycleIDs [][]string
 	for _, cycle := range cycles {
@@ -1669,10 +1697,12 @@ func BuildReadyExplanation(
 	return ReadyExplanation{
 		Ready:   readyItems,
 		Blocked: blockedItems,
+		Held:    heldItems,
 		Cycles:  cycleIDs,
 		Summary: ExplainSummary{
 			TotalReady:   len(readyItems),
 			TotalBlocked: len(blockedItems),
+			TotalHeld:    len(heldItems),
 			CycleCount:   len(cycleIDs),
 		},
 	}
@@ -1710,14 +1740,26 @@ type MoleculeLastActivity struct {
 
 // Statistics provides aggregate metrics
 type Statistics struct {
-	TotalIssues             int     `json:"total_issues"`
-	OpenIssues              int     `json:"open_issues"`
-	InProgressIssues        int     `json:"in_progress_issues"`
-	ClosedIssues            int     `json:"closed_issues"`
-	BlockedIssues           *int    `json:"blocked_issues"`  // nil when --no-blocked skips computation
-	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
-	ReadyIssues             *int    `json:"ready_issues"`    // nil when --no-blocked skips computation (readiness needs the blocked set)
-	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
+	TotalIssues      int  `json:"total_issues"`
+	OpenIssues       int  `json:"open_issues"`
+	InProgressIssues int  `json:"in_progress_issues"`
+	ClosedIssues     int  `json:"closed_issues"`
+	BlockedIssues    *int `json:"blocked_issues"`  // nil when --no-blocked skips computation
+	DeferredIssues   int  `json:"deferred_issues"` // Issues on ice
+	// ReadyIssues is nil when --no-blocked skips computation (readiness needs
+	// the blocked set).
+	//
+	// It is OpenIssues minus BlockedIssues, which is an APPROXIMATION of the
+	// ready front and is deliberately not len(GetReadyWork(...)). Ready work
+	// applies predicates this subtraction knows nothing about — excluded issue
+	// types, pinned, deferred and deferred-parent children, ephemeral wisps,
+	// and the 'human' operator-queue label (sqlbuild.ReadyWorkExcludeLabels) —
+	// so this count runs HIGH wherever those apply. The drift predates the
+	// label exclusion and is shared by all three backend implementations,
+	// which compute the same subtraction independently. Read it as a cheap
+	// headline number, not as the size of `bd ready`.
+	ReadyIssues             *int    `json:"ready_issues"`
+	PinnedIssues            int     `json:"pinned_issues"` // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }

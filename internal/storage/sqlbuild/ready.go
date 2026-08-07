@@ -2,6 +2,7 @@ package sqlbuild
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,20 +42,22 @@ func ReadyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
 // plus the caller's own --exclude-label set: a bead carrying types.LabelHuman
 // is queued for an operator decision, not for dispatch.
 //
-// Naming the label in Labels or LabelsAny opts back in, so `bd ready --label
+// A filter that SELECTS the human label opts back in, so `bd ready --label
 // human` returns that queue rather than the empty set an unconditional
-// exclusion would produce.
+// exclusion would produce. All four label-selection surfaces count, not just
+// the two exact-match ones: --label-pattern and --label-regex are inclusion
+// clauses too, so combining a default exclusion with a pattern only a
+// human-labeled bead can satisfy would return nothing at all, silently.
+//
+// The opt-in deliberately does NOT trigger on merely having some label filter.
+// `bd ready --label backend` must still hide beads held for an operator, and
+// the directory-label default (GH#541) puts a label set on nearly every
+// listing in a scoped directory — treating that as consent would retire this
+// exclusion almost everywhere it matters.
 func ReadyWorkExcludeLabels(filter types.WorkFilter) []string {
 	out := append([]string(nil), filter.ExcludeLabels...)
-	for _, label := range filter.Labels {
-		if label == types.LabelHuman {
-			return out
-		}
-	}
-	for _, label := range filter.LabelsAny {
-		if label == types.LabelHuman {
-			return out
-		}
+	if readyWorkSelectsHumanLabel(filter) {
+		return out
 	}
 	for _, label := range out {
 		if label == types.LabelHuman {
@@ -62,6 +65,72 @@ func ReadyWorkExcludeLabels(filter types.WorkFilter) []string {
 		}
 	}
 	return append(out, types.LabelHuman)
+}
+
+// readyWorkSelectsHumanLabel reports whether the filter's label-inclusion
+// clauses can admit a bead labeled types.LabelHuman.
+//
+// The pattern and regex tests are case-INSENSITIVE and err toward reporting a
+// match. LIKE and REGEXP are case-insensitive under the default collation, and
+// the cost of the two mistakes is asymmetric: a false positive shows the
+// operator queue in a label-filtered listing that already named something very
+// close to it, while a false negative is the silent empty result this test
+// exists to prevent.
+func readyWorkSelectsHumanLabel(filter types.WorkFilter) bool {
+	for _, label := range filter.Labels {
+		if label == types.LabelHuman {
+			return true
+		}
+	}
+	for _, label := range filter.LabelsAny {
+		if label == types.LabelHuman {
+			return true
+		}
+	}
+	if filter.LabelPattern != "" && globMatchesLabel(filter.LabelPattern, types.LabelHuman) {
+		return true
+	}
+	if filter.LabelRegex != "" && regexMatchesLabel(filter.LabelRegex, types.LabelHuman) {
+		return true
+	}
+	return false
+}
+
+// globMatchesLabel reports whether a --label-pattern glob selects label.
+// It mirrors globToLikePattern's translation (* and ? are the only
+// metacharacters; everything else, including % and _, is literal) against
+// LIKE's whole-string match.
+func globMatchesLabel(pattern, label string) bool {
+	var b strings.Builder
+	b.WriteString("(?i)^")
+	for _, c := range pattern {
+		switch c {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteString(".")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return false
+	}
+	return re.MatchString(label)
+}
+
+// regexMatchesLabel reports whether a --label-regex selects label. Both Go's
+// regexp and SQL REGEXP are unanchored, so this needs no anchors of its own.
+// An expression Go cannot compile is one the backend is unlikely to accept
+// either, so it reports no match and leaves the exclusion in place.
+func regexMatchesLabel(expr, label string) bool {
+	re, err := regexp.Compile("(?i)" + expr)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(label)
 }
 
 // ReadyWorkOrder is an ORDER BY fragment plus any args its CASE expressions

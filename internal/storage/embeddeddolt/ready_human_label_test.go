@@ -62,7 +62,7 @@ func TestReadyWorkExcludesHumanLabelledIssues(t *testing.T) {
 		return false
 	}
 
-	t.Run("default ready work hides the human-labelled bead", func(t *testing.T) {
+	t.Run("default ready work hides the human-labeled bead", func(t *testing.T) {
 		ids := readyIDs(t, types.WorkFilter{})
 		if contains(ids, "rh-awaiting") {
 			t.Errorf("rh-awaiting is awaiting an operator decision and must not be ready work: %v", ids)

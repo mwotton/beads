@@ -1,11 +1,12 @@
 package types
 
 import (
+	"strings"
 	"testing"
 )
 
 func TestBuildReadyExplanation_NoIssues(t *testing.T) {
-	result := BuildReadyExplanation(nil, nil, nil, nil, nil, nil)
+	result := BuildReadyExplanation(nil, nil, nil, nil, nil, nil, nil)
 
 	if len(result.Ready) != 0 {
 		t.Errorf("expected 0 ready items, got %d", len(result.Ready))
@@ -30,7 +31,7 @@ func TestBuildReadyExplanation_ReadyWithNoDeps(t *testing.T) {
 		{ID: "bd-2", Title: "Second", Priority: 2, Status: StatusOpen},
 	}
 
-	result := BuildReadyExplanation(issues, nil, nil, nil, nil, nil)
+	result := BuildReadyExplanation(issues, nil, nil, nil, nil, nil, nil)
 
 	if len(result.Ready) != 2 {
 		t.Fatalf("expected 2 ready items, got %d", len(result.Ready))
@@ -62,7 +63,7 @@ func TestBuildReadyExplanation_ReadyWithResolvedBlockers(t *testing.T) {
 		},
 	}
 
-	result := BuildReadyExplanation(issues, nil, depCounts, allDeps, nil, nil)
+	result := BuildReadyExplanation(issues, nil, depCounts, allDeps, nil, nil, nil)
 
 	if len(result.Ready) != 1 {
 		t.Fatalf("expected 1 ready item, got %d", len(result.Ready))
@@ -94,7 +95,7 @@ func TestBuildReadyExplanation_ReadyWithParent(t *testing.T) {
 		},
 	}
 
-	result := BuildReadyExplanation(issues, nil, nil, allDeps, nil, nil)
+	result := BuildReadyExplanation(issues, nil, nil, allDeps, nil, nil, nil)
 
 	if len(result.Ready) != 1 {
 		t.Fatalf("expected 1 ready item, got %d", len(result.Ready))
@@ -121,7 +122,7 @@ func TestBuildReadyExplanation_BlockedIssues(t *testing.T) {
 		"bd-blocker-2": {ID: "bd-blocker-2", Title: "Design review", Status: StatusInProgress, Priority: 1},
 	}
 
-	result := BuildReadyExplanation(nil, blockedIssues, nil, nil, blockerMap, nil)
+	result := BuildReadyExplanation(nil, blockedIssues, nil, nil, blockerMap, nil, nil)
 
 	if len(result.Blocked) != 1 {
 		t.Fatalf("expected 1 blocked item, got %d", len(result.Blocked))
@@ -161,7 +162,7 @@ func TestBuildReadyExplanation_BlockedWithMissingBlocker(t *testing.T) {
 	}
 
 	// Empty blocker map — blocker not found
-	result := BuildReadyExplanation(nil, blockedIssues, nil, nil, nil, nil)
+	result := BuildReadyExplanation(nil, blockedIssues, nil, nil, nil, nil, nil)
 
 	if len(result.Blocked) != 1 {
 		t.Fatalf("expected 1 blocked item, got %d", len(result.Blocked))
@@ -184,7 +185,7 @@ func TestBuildReadyExplanation_Cycles(t *testing.T) {
 		},
 	}
 
-	result := BuildReadyExplanation(nil, nil, nil, nil, nil, cycles)
+	result := BuildReadyExplanation(nil, nil, nil, nil, nil, cycles, nil)
 
 	if len(result.Cycles) != 1 {
 		t.Fatalf("expected 1 cycle, got %d", len(result.Cycles))
@@ -221,7 +222,7 @@ func TestBuildReadyExplanation_FullScenario(t *testing.T) {
 		{{ID: "bd-x"}, {ID: "bd-y"}},
 	}
 
-	result := BuildReadyExplanation(readyIssues, blockedIssues, depCounts, nil, blockerMap, cycles)
+	result := BuildReadyExplanation(readyIssues, blockedIssues, depCounts, nil, blockerMap, cycles, nil)
 
 	if result.Summary.TotalReady != 1 {
 		t.Errorf("TotalReady=%d, want 1", result.Summary.TotalReady)
@@ -237,5 +238,45 @@ func TestBuildReadyExplanation_FullScenario(t *testing.T) {
 	}
 	if result.Blocked[0].BlockedBy[0].Title != "Ready task" {
 		t.Errorf("Blocked item blocker title=%q, want 'Ready task'", result.Blocked[0].BlockedBy[0].Title)
+	}
+}
+
+// sk-1pc: a bead labeled 'human' is unblocked yet withheld from ready work,
+// so it lands in NEITHER the ready set nor the blocked set. `bd ready
+// --explain` is the tool built to answer "why isn't this bead ready?", so the
+// explanation needs a category that accounts for the absence.
+func TestBuildReadyExplanation_HeldForHuman(t *testing.T) {
+	held := []*Issue{
+		{ID: "bd-held1", Title: "Awaiting an operator ruling", Priority: 1},
+		{ID: "bd-held2", Title: "Second question", Priority: 2},
+	}
+
+	result := BuildReadyExplanation(nil, nil, nil, nil, nil, nil, held)
+
+	if got := len(result.Held); got != 2 {
+		t.Fatalf("Held=%d, want 2", got)
+	}
+	if result.Summary.TotalHeld != 2 {
+		t.Errorf("TotalHeld=%d, want 2", result.Summary.TotalHeld)
+	}
+	if result.Held[0].ID != "bd-held1" || result.Held[0].Title != "Awaiting an operator ruling" {
+		t.Errorf("Held[0] = %+v, want the held issue carried through intact", result.Held[0])
+	}
+	// The reason must name the label, since that is the thing an operator
+	// removes to release the bead.
+	if !strings.Contains(result.Held[0].Reason, LabelHuman) {
+		t.Errorf("Held[0].Reason = %q, want it to name %q", result.Held[0].Reason, LabelHuman)
+	}
+	// Held beads are not ready and not blocked.
+	if len(result.Ready) != 0 || len(result.Blocked) != 0 {
+		t.Errorf("held issues must not leak into ready (%d) or blocked (%d)", len(result.Ready), len(result.Blocked))
+	}
+}
+
+// A nil entry must not panic the explanation builder.
+func TestBuildReadyExplanation_HeldSkipsNil(t *testing.T) {
+	result := BuildReadyExplanation(nil, nil, nil, nil, nil, nil, []*Issue{nil})
+	if len(result.Held) != 0 || result.Summary.TotalHeld != 0 {
+		t.Errorf("nil held entry must be skipped, got Held=%d TotalHeld=%d", len(result.Held), result.Summary.TotalHeld)
 	}
 }

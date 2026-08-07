@@ -196,6 +196,67 @@ func TestReadyWorkExcludeLabels(t *testing.T) {
 			filter: types.WorkFilter{Labels: []string{"needs-human"}},
 			want:   []string{types.LabelHuman},
 		},
+		// --label-pattern and --label-regex are inclusion clauses too. A
+		// pattern that selects the label combined with the default exclusion
+		// is a contradiction that returns nothing at all, silently.
+		{
+			name:   "--label-pattern selecting the label opts back in",
+			filter: types.WorkFilter{LabelPattern: "human*"},
+			want:   nil,
+		},
+		{
+			name:   "--label-pattern matching exactly opts back in",
+			filter: types.WorkFilter{LabelPattern: "human"},
+			want:   nil,
+		},
+		{
+			name:   "--label-pattern with ? opts back in",
+			filter: types.WorkFilter{LabelPattern: "huma?"},
+			want:   nil,
+		},
+		{
+			// LIKE is a whole-string match, so this selects "human-review"
+			// but never "human" itself.
+			name:   "--label-pattern that cannot match the label keeps the exclusion",
+			filter: types.WorkFilter{LabelPattern: "human-*"},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			name:   "an unrelated --label-pattern keeps the exclusion",
+			filter: types.WorkFilter{LabelPattern: "tier:*"},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			name:   "--label-regex selecting the label opts back in",
+			filter: types.WorkFilter{LabelRegex: "^human$"},
+			want:   nil,
+		},
+		{
+			name:   "an unrelated --label-regex keeps the exclusion",
+			filter: types.WorkFilter{LabelRegex: "^tech-(debt|legacy)$"},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			// Unparseable here is unparseable at the backend, so the
+			// conservative answer is to leave the exclusion in place
+			// rather than panic or silently widen the queue.
+			name:   "a malformed --label-regex keeps the exclusion",
+			filter: types.WorkFilter{LabelRegex: "^human($"},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			// A label filter that does not select the label must NOT
+			// retire the exclusion — the directory-label default puts one
+			// on nearly every listing in a scoped directory.
+			name:   "an unrelated --label keeps the exclusion",
+			filter: types.WorkFilter{Labels: []string{"backend"}},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			name:   "an unrelated --label-any keeps the exclusion",
+			filter: types.WorkFilter{LabelsAny: []string{"lane-a", "lane-c"}},
+			want:   []string{types.LabelHuman},
+		},
 	}
 
 	for _, tt := range tests {
