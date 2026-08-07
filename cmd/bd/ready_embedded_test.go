@@ -262,6 +262,50 @@ func TestEmbeddedReady(t *testing.T) {
 			t.Errorf("bd ready --label-regex '^human$' must not return an empty set:\n%s", rex)
 		}
 
+		// The exclusion lives in the shared ready-work builder specifically so
+		// every DISPATCH surface inherits it, which is a claim about call
+		// chains until something exercises them. `--claim` is the one that
+		// matters most: it is how an agent takes work, so a held bead reaching
+		// it is the actual double-handling this change exists to stop.
+		// Filtered to a label only the held bead carries, so a pass claims
+		// nothing and cannot disturb the other subtests sharing this dir.
+		cmd = exec.Command(bd, "label", "add", flagged.ID, "sk1pc-claim")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("label add sk1pc-claim failed: %v\n%s", err, out)
+		}
+		claimCmd := exec.Command(bd, "ready", "--claim", "--json", "--label", "sk1pc-claim")
+		claimCmd.Dir = dir
+		claimCmd.Env = bdEnv(dir)
+		claimOut, claimErr, err := runCommandBuffers(t, claimCmd)
+		if err != nil {
+			t.Fatalf("bd ready --claim failed: %v\nstdout:\n%s\nstderr:\n%s", err, claimOut.String(), claimErr.String())
+		}
+		var claimed []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(claimOut.Bytes()), &claimed); err != nil {
+			t.Fatalf("parse claim JSON: %v\n%s", err, claimOut.String())
+		}
+		if len(claimed) != 0 {
+			t.Errorf("bd ready --claim must not claim a bead held for a human, claimed %+v", claimed)
+		}
+
+		// `bd list --ready` documents itself as using the same ready-work
+		// semantics, so it must agree.
+		listCmd := exec.Command(bd, "list", "--ready", "--label", "sk1pc-ready")
+		listCmd.Dir = dir
+		listCmd.Env = bdEnv(dir)
+		listOut, listErr, err := runCommandBuffers(t, listCmd)
+		if err != nil {
+			t.Fatalf("bd list --ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, listOut.String(), listErr.String())
+		}
+		if strings.Contains(listOut.String(), flagged.ID) {
+			t.Errorf("bd list --ready shares ready semantics and must hide %s:\n%s", flagged.ID, listOut.String())
+		}
+		if !strings.Contains(listOut.String(), nearMiss.ID) {
+			t.Errorf("bd list --ready must still show %s:\n%s", nearMiss.ID, listOut.String())
+		}
+
 		// --explain is the "why isn't this bead ready?" tool, so the held
 		// bead must be accounted for there rather than simply missing from
 		// both the ready and blocked sets.
