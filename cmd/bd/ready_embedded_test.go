@@ -203,6 +203,121 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 	})
 
+	// sk-1pc: a bead labeled 'human' is queued for an operator decision and
+	// used to stay in the dispatch queue too, so a worker could claim and work
+	// a question that was simultaneously awaiting a ruling.
+	t.Run("ready_excludes_human_label", func(t *testing.T) {
+		flagged := bdCreate(t, bd, dir, "Awaiting an operator ruling", "--type", "task", "--label", "sk1pc-ready")
+		nearMiss := bdCreate(t, bd, dir, "Near miss label", "--type", "task", "--label", "sk1pc-ready")
+
+		cmd := exec.Command(bd, "label", "add", flagged.ID, "human")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("label add human failed: %v\n%s", err, out)
+		}
+		cmd = exec.Command(bd, "label", "add", nearMiss.ID, "needs-human")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("label add needs-human failed: %v\n%s", err, out)
+		}
+
+		bdReady := func(t *testing.T, args ...string) string {
+			t.Helper()
+			cmd := exec.Command(bd, append([]string{"ready"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd ready %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			return stdout.String()
+		}
+
+		out := bdReady(t, "--label", "sk1pc-ready")
+		if strings.Contains(out, flagged.ID) {
+			t.Errorf("bead %s is flagged for a human and must not appear in bd ready:\n%s", flagged.ID, out)
+		}
+		// Only the exact label is the operator queue.
+		if !strings.Contains(out, nearMiss.ID) {
+			t.Errorf("'needs-human' is an ordinary label and %s must stay ready:\n%s", nearMiss.ID, out)
+		}
+		// Removed from dispatch, not from sight.
+		if listOut := bdHuman(t, bd, dir, "list"); !strings.Contains(listOut, flagged.ID) {
+			t.Errorf("expected %s in the human decision queue:\n%s", flagged.ID, listOut)
+		}
+		if named := bdReady(t, "--label", "human"); !strings.Contains(named, flagged.ID) {
+			t.Errorf("bd ready --label human must return the human queue:\n%s", named)
+		}
+
+		// --label-pattern and --label-regex are inclusion clauses too. Before
+		// the opt-in covered them, pattern-selecting the label AND excluding
+		// it by default was a contradiction that returned nothing, silently.
+		if pat := bdReady(t, "--label-pattern", "human*"); !strings.Contains(pat, flagged.ID) {
+			t.Errorf("bd ready --label-pattern 'human*' must not return an empty set:\n%s", pat)
+		}
+		if rex := bdReady(t, "--label-regex", "^human$"); !strings.Contains(rex, flagged.ID) {
+			t.Errorf("bd ready --label-regex '^human$' must not return an empty set:\n%s", rex)
+		}
+
+		// The exclusion lives in the shared ready-work builder specifically so
+		// every DISPATCH surface inherits it, which is a claim about call
+		// chains until something exercises them. `--claim` is the one that
+		// matters most: it is how an agent takes work, so a held bead reaching
+		// it is the actual double-handling this change exists to stop.
+		// Filtered to a label only the held bead carries, so a pass claims
+		// nothing and cannot disturb the other subtests sharing this dir.
+		cmd = exec.Command(bd, "label", "add", flagged.ID, "sk1pc-claim")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("label add sk1pc-claim failed: %v\n%s", err, out)
+		}
+		claimCmd := exec.Command(bd, "ready", "--claim", "--json", "--label", "sk1pc-claim")
+		claimCmd.Dir = dir
+		claimCmd.Env = bdEnv(dir)
+		claimOut, claimErr, err := runCommandBuffers(t, claimCmd)
+		if err != nil {
+			t.Fatalf("bd ready --claim failed: %v\nstdout:\n%s\nstderr:\n%s", err, claimOut.String(), claimErr.String())
+		}
+		var claimed []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(claimOut.Bytes()), &claimed); err != nil {
+			t.Fatalf("parse claim JSON: %v\n%s", err, claimOut.String())
+		}
+		if len(claimed) != 0 {
+			t.Errorf("bd ready --claim must not claim a bead held for a human, claimed %+v", claimed)
+		}
+
+		// `bd list --ready` documents itself as using the same ready-work
+		// semantics, so it must agree.
+		listCmd := exec.Command(bd, "list", "--ready", "--label", "sk1pc-ready")
+		listCmd.Dir = dir
+		listCmd.Env = bdEnv(dir)
+		listOut, listErr, err := runCommandBuffers(t, listCmd)
+		if err != nil {
+			t.Fatalf("bd list --ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, listOut.String(), listErr.String())
+		}
+		if strings.Contains(listOut.String(), flagged.ID) {
+			t.Errorf("bd list --ready shares ready semantics and must hide %s:\n%s", flagged.ID, listOut.String())
+		}
+		if !strings.Contains(listOut.String(), nearMiss.ID) {
+			t.Errorf("bd list --ready must still show %s:\n%s", nearMiss.ID, listOut.String())
+		}
+
+		// --explain is the "why isn't this bead ready?" tool, so the held
+		// bead must be accounted for there rather than simply missing from
+		// both the ready and blocked sets.
+		explain := bdReady(t, "--explain")
+		if !strings.Contains(explain, flagged.ID) {
+			t.Errorf("bd ready --explain must account for held bead %s:\n%s", flagged.ID, explain)
+		}
+		if !strings.Contains(explain, "Held for human decision") {
+			t.Errorf("bd ready --explain must name the held category:\n%s", explain)
+		}
+	})
+
 	// ===== -C flag =====
 
 	t.Run("ready_with_C_flag", func(t *testing.T) {

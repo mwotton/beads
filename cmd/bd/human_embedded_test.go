@@ -6,10 +6,33 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 )
+
+// assertStatLine asserts that `bd human stats` reported want for the named
+// counter, tolerating any run of whitespace between the label and the value so
+// a change to the printf column widths is not a test failure.
+func assertStatLine(t *testing.T, out, label string, want int) {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(label) + `:\s+(\d+)\s*$`)
+	m := re.FindStringSubmatch(out)
+	if m == nil {
+		t.Errorf("no %q line in stats output:\n%s", label, out)
+		return
+	}
+	got, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Errorf("unparseable %q count %q:\n%s", label, m[1], out)
+		return
+	}
+	if got != want {
+		t.Errorf("stats %s = %d, want %d:\n%s", label, got, want, out)
+	}
+}
 
 // bdHuman runs "bd human" with the given args and returns stdout.
 func bdHuman(t *testing.T, bd, dir string, args ...string) string {
@@ -143,6 +166,32 @@ func TestEmbeddedHuman(t *testing.T) {
 		if !strings.Contains(string(showOut2), "Dismissed: Not needed") {
 			t.Errorf("expected dismiss reason in output:\n%s", showOut2)
 		}
+
+		// sk-1pc: neither close cleared the 'human' label, so both beads used
+		// to stay in the operator's decision queue as though they were still
+		// pending. A resolved decision is not a pending one.
+		listAfter := bdHuman(t, bd, dir, "list")
+		for _, closed := range []string{id, id2} {
+			if strings.Contains(listAfter, closed) {
+				t.Errorf("closed bead %s must not remain in the pending human list:\n%s", closed, listAfter)
+			}
+		}
+
+		// They are omitted, not hidden: --status closed still reaches them,
+		// and the stats still count them as resolved.
+		closedOut := bdHuman(t, bd, dir, "list", "--status", "closed")
+		for _, closed := range []string{id, id2} {
+			if !strings.Contains(closedOut, closed) {
+				t.Errorf("expected %s under --status closed:\n%s", closed, closedOut)
+			}
+		}
+		// Matched on the label/value pair rather than the exact printf column
+		// widths, so reformatting the stats block cannot fail this test for a
+		// cosmetic reason.
+		statsOut := bdHuman(t, bd, dir, "stats")
+		assertStatLine(t, statsOut, "Pending", 0)
+		assertStatLine(t, statsOut, "Responded", 1)
+		assertStatLine(t, statsOut, "Dismissed", 1)
 	})
 }
 

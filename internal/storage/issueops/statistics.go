@@ -40,6 +40,9 @@ func ScanIssueCountsInTx(ctx context.Context, tx DBTX, stats *types.Statistics) 
 // embedded-Dolt implementations: ScanIssueCountsInTx for the status counts, a direct
 // blocked count (the is_blocked flag is maintained in-tx by the shared layer), then
 // ReadyIssues = OpenIssues - BlockedIssues clamped at zero.
+//
+// That subtraction is an approximation of the ready front, not its size: see
+// types.Statistics.ReadyIssues for the predicates it does not model.
 func GetStatisticsInTx(ctx context.Context, tx DBTX) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 	if err := ScanIssueCountsInTx(ctx, tx, stats); err != nil {

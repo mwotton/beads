@@ -163,12 +163,9 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		if stats, statsErr := uw.IssueUseCase().GetStatistics(ctx); statsErr == nil {
 			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 		}
-		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
-		} else {
-			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-		}
+		printEmptyReadyQueue(hasOpenIssues, func() int {
+			return countHeldForHumanProxied(ctx, uw, in.filter)
+		})
 		return nil
 	}
 
@@ -277,6 +274,19 @@ func proxiedReadyClaimer() (issueops.ReadyClaimer, error) {
 	return src.ReadyClaimer()
 }
 
+// countHeldForHumanProxied is countHeldForHuman's daemon-mode twin: the same
+// heldForHumanFilter, read through the unit of work. Advisory in the same way —
+// a failure leaves the hint generic rather than failing a listing that already
+// succeeded.
+func countHeldForHumanProxied(ctx context.Context, uw uow.UnitOfWork, filter types.WorkFilter) int {
+	page, err := uw.IssueUseCase().GetReadyWork(ctx, heldForHumanFilter(filter))
+	if err != nil {
+		debug.Logf("warning: failed to count human-held issues: %v", err)
+		return 0
+	}
+	return len(page.Items)
+}
+
 func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
 	filter, err := readyExplainFilter()
 	if err != nil {
@@ -289,6 +299,15 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 	readyIssues := readyPage.Items
 
 	blockedIssues, err := uw.IssueUseCase().GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	heldFilter, err := readyExplainHeldFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	heldPage, err := uw.IssueUseCase().GetReadyWork(ctx, heldFilter)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -341,7 +360,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		blockerMap[wisp.ID] = wisp
 	}
 
-	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles)
+	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles, heldPage.Items)
 
 	if jsonOutput {
 		_ = outputJSON(explanation)
