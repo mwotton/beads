@@ -357,6 +357,9 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// fsckTimeout is the repository's pre-push integrity-check budget.
+	fsckTimeout time.Duration
 }
 
 // Config holds Dolt database configuration
@@ -484,6 +487,11 @@ type Config struct {
 	// execWithLongTimeout/openLongTimeoutConn instead.
 	PoolReadTimeout  time.Duration
 	PoolWriteTimeout time.Duration
+
+	// FSCKTimeout bounds the pre-push local integrity check. Zero reads
+	// dolt.fsck-timeout from startup configuration, then defaults to 30s.
+	// BEADS_FSCK_TIMEOUT remains the runtime override.
+	FSCKTimeout time.Duration
 }
 
 // Defaults for the *sql.DB connection pool. Exported for tests/callers that
@@ -573,19 +581,22 @@ func parseTimeout(raw string, fallback time.Duration) time.Duration {
 // fsckTimeout is the default maximum time to wait for dolt fsck to verify the
 // local chunk store before a push. fsck reads local files only; 30 seconds is
 // ample for small stores. Large stores may need more time; set
-// BEADS_FSCK_TIMEOUT to override.
+// dolt.fsck-timeout in config.yaml or BEADS_FSCK_TIMEOUT to override.
 const fsckTimeout = 30 * time.Second
 
 // fsckTimeoutEnv is the environment variable that overrides fsckTimeout.
 const fsckTimeoutEnv = "BEADS_FSCK_TIMEOUT"
 
 // fsckTimeoutDuration returns the configured fsck timeout. The env var
-// BEADS_FSCK_TIMEOUT overrides the compiled-in fsckTimeout const; valid
+// BEADS_FSCK_TIMEOUT overrides the configured repository budget; valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
 // seconds (e.g. "90") are accepted. Unset or invalid values fall back to
-// fsckTimeout.
-func fsckTimeoutDuration() time.Duration {
-	return timeoutFromEnv(fsckTimeoutEnv, fsckTimeout)
+// configured budget (or fsckTimeout when no budget was supplied).
+func fsckTimeoutDuration(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		configured = fsckTimeout
+	}
+	return timeoutFromEnv(fsckTimeoutEnv, configured)
 }
 
 // Retry configuration for transient connection errors (stale pool connections,
@@ -1496,6 +1507,9 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	applyConfigDefaults(cfg)
+	if err := applyFSCKTimeout(cfg); err != nil {
+		return nil, err
+	}
 
 	// Hard guard: tests must NEVER connect to the production Dolt server.
 	// applyConfigDefaults rewrites a production port to 1 in BEADS_TEST_MODE=1
@@ -1909,6 +1923,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		remoteUser:             cfg.RemoteUser,
 		remotePassword:         cfg.RemotePassword,
 		serverMode:             true,
+		fsckTimeout:            cfg.FSCKTimeout,
 		readOnly:               cfg.ReadOnly,
 		autoStartedServerDir:   autoStartedDir,
 	}
@@ -3513,7 +3528,7 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	if _, err := os.Stat(filepath.Join(dir, ".dolt", "noms")); os.IsNotExist(err) {
 		return nil
 	}
-	fsckCtx, cancel := context.WithTimeout(ctx, fsckTimeoutDuration())
+	fsckCtx, cancel := context.WithTimeout(ctx, fsckTimeoutDuration(s.fsckTimeout))
 	defer cancel()
 	cmd := exec.CommandContext(fsckCtx, "dolt", "fsck", "--quiet") // #nosec G204 -- fixed command
 	cmd.Dir = dir
